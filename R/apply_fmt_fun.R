@@ -26,129 +26,38 @@ apply_fmt_fun <- function(x, replace = FALSE) {
     x <- x |> dplyr::mutate(.after = "stat", stat_fmt = list(NULL))
   }
 
-  stat_fmt <- x[["stat_fmt"]]
-  fmt_fun <- x[["fmt_fun"]]
-  stat <- x[["stat"]]
-  variable <- x[["variable"]]
-  stat_name <- x[["stat_name"]]
-  n_rows <- nrow(x)
-
-  # identify which rows need formatting
-  to_format_idx <- which(
-    !vapply(fmt_fun, is.null, logical(1L)) &
-      vapply(stat_fmt, is.null, logical(1L))
-  )
-
-  if (length(to_format_idx) == 0L) {
-    return(x)
-  }
-
-  # Group eligible rows by fmt_fun object
-  # For integerish / character fmt_fun, we can group by their string/numeric value
-  # For functions or other types, we can group by identical objects
-  fmt_fun_sub <- fmt_fun[to_format_idx]
-  
-  # Create group keys for fmt_funs
-  group_keys <- character(length(to_format_idx))
-  fn_registry <- list()
-  
-  for (i in seq_along(to_format_idx)) {
-    fn_item <- fmt_fun_sub[[i]]
-    if (is.character(fn_item) && length(fn_item) == 1L) {
-      group_keys[i] <- paste0("chr:", fn_item)
-    } else if (is.numeric(fn_item) && length(fn_item) == 1L) {
-      group_keys[i] <- paste0("num:", fn_item)
-    } else {
-      # Function or other object: find match in fn_registry
-      matched <- FALSE
-      for (k in seq_along(fn_registry)) {
-        if (identical(fn_item, fn_registry[[k]])) {
-          group_keys[i] <- paste0("obj:", k)
-          matched <- TRUE
-          break
-        }
-      }
-      if (!matched) {
-        new_k <- length(fn_registry) + 1L
-        fn_registry[[new_k]] <- fn_item
-        group_keys[i] <- paste0("obj:", new_k)
-      }
-    }
-  }
-
-  groups <- split(to_format_idx, group_keys)
-
-  for (grp_indices in groups) {
-    first_idx <- grp_indices[1L]
-    raw_fn <- fmt_fun[[first_idx]]
-    var_first <- variable[first_idx]
-    stat_first <- stat_name[first_idx]
-
-    # Resolve format function (and validate format alias)
-    resolved_fn <- tryCatch(
-      alias_as_fmt_fun(raw_fn, var_first, stat_first),
-      error = function(e) {
-        cli::cli_abort(
-          c("There was an error applying the formatting function to
-             statistic {.val {stat_first}} for variable {.val {var_first}}.",
-            "i" = "Perhaps try formmatting function {.fun as.character}? See error message below:",
-            "x" = conditionMessage(e)
+  x |>
+    dplyr::mutate(
+      stat_fmt =
+        pmap(
+          list(
+            .data$stat,
+            .data$variable,
+            .data$stat_name,
+            .data$fmt_fun,
+            .data$stat_fmt
           ),
-          call = get_cli_abort_call()
-        )
-      }
-    )
-
-    # Extract stats for all rows in this group
-    stats_list <- stat[grp_indices]
-
-    # Check if stats are all scalars and can be unlisted into a vector
-    # (or if any is non-scalar/list/etc.)
-    can_vectorize <- is.function(resolved_fn) &&
-      all(vapply(stats_list, function(s) length(s) == 1L && !is.list(s), logical(1L)))
-
-    formatted_res <- NULL
-    if (can_vectorize) {
-      stats_vec <- unlist(stats_list, recursive = FALSE, use.names = FALSE)
-      # Try vectorized call
-      formatted_res <- tryCatch(
-        as.list(do.call(resolved_fn, list(stats_vec))),
-        error = function(e) NULL
-      )
-      if (!is.null(formatted_res) && length(formatted_res) != length(grp_indices)) {
-        formatted_res <- NULL
-      }
-    }
-
-    if (!is.null(formatted_res)) {
-      stat_fmt[grp_indices] <- formatted_res
-    } else {
-      # Fallback to row-by-row invocation within this group with proper error handling
-      for (idx in grp_indices) {
-        var_i <- variable[idx]
-        stat_i <- stat_name[idx]
-        stat_fmt[[idx]] <- tryCatch(
-          {
-            fn_i <- if (identical(raw_fn, fmt_fun[[idx]])) resolved_fn else alias_as_fmt_fun(fmt_fun[[idx]], var_i, stat_i)
-            do.call(fn_i, args = list(stat[[idx]]))
-          },
-          error = function(e) {
-            cli::cli_abort(
-              c("There was an error applying the formatting function to
-                 statistic {.val {stat_i}} for variable {.val {var_i}}.",
-                "i" = "Perhaps try formmatting function {.fun as.character}? See error message below:",
-                "x" = conditionMessage(e)
-              ),
-              call = get_cli_abort_call()
-            )
+          function(stat, variable, stat_name, fn, stat_fmt) {
+            if (!is.null(fn) && is.null(stat_fmt)) {
+              tryCatch(
+                do.call(alias_as_fmt_fun(fn, variable, stat_name), args = list(stat)),
+                error = \(e) {
+                  cli::cli_abort(
+                    c("There was an error applying the formatting function to
+                       statistic {.val {stat_name}} for variable {.val {variable}}.",
+                      "i" = "Perhaps try formmatting function {.fun as.character}? See error message below:",
+                      "x" = conditionMessage(e)
+                    ),
+                    call = get_cli_abort_call()
+                  )
+                }
+              )
+            } else {
+              stat_fmt
+            }
           }
         )
-      }
-    }
-  }
-
-  x[["stat_fmt"]] <- stat_fmt
-  x
+    )
 }
 
 #' Convert Alias to Function
